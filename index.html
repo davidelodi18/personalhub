@@ -376,7 +376,7 @@
     <div class="toolbar">
       <div class="search">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <input id="search" type="text" placeholder="Cerca un programma…  (premi  /  )" autocomplete="off">
+        <input id="search" name="hub-q-apps" type="search" autocomplete="off" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore placeholder="Cerca un programma…  (premi  /  )">
       </div>
       <div class="count" id="count"></div>
       <button class="btn primary" id="btnAddApp">+ Aggiungi programma</button>
@@ -388,7 +388,7 @@
     <div class="toolbar">
       <div class="search">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <input id="asearch" type="text" placeholder="Cerca tra gli archiviati…" autocomplete="off">
+        <input id="asearch" name="hub-q-arch" type="search" autocomplete="off" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore placeholder="Cerca tra gli archiviati…">
       </div>
       <div class="count" id="acount"></div>
     </div>
@@ -400,7 +400,7 @@
     <div class="toolbar">
       <div class="search">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-        <input id="vsearch" type="text" placeholder="Cerca un sito, un utente…" autocomplete="off">
+        <input id="vsearch" name="hub-q-vault" type="search" autocomplete="off" autocorrect="off" spellcheck="false" readonly onfocus="this.removeAttribute('readonly')" data-lpignore="true" data-1p-ignore placeholder="Cerca un sito, un utente…">
       </div>
       <div class="count" id="vcount"></div>
       <button class="btn primary" id="btnAddEntry">+ Aggiungi password</button>
@@ -724,6 +724,7 @@ async function unlock(pw){
 
   $("lock").style.display = "none";
   $("app").style.display = "";
+  clearSearches();
   renderApps(); renderVault(); renderCryptoNote();
 
   if(signedIn){ setStatus(true, "sincronizzato"); startSync(); }
@@ -863,12 +864,19 @@ function renderVaultWarn(){
   }
 }
 
+/* Chrome a volte riempie da solo i campi di ricerca con l'email salvata:
+   li svuoto all'accesso e a ogni cambio di scheda. */
+function clearSearches(){
+  ["search","asearch","vsearch"].forEach(function(id){ $(id).value = ""; $(id).setAttribute("readonly",""); });
+}
+
 /* ─────────── viste ─────────── */
 Array.prototype.forEach.call(document.querySelectorAll(".tab[data-view]"), function(t){
   t.addEventListener("click", function(){
     Array.prototype.forEach.call(document.querySelectorAll(".tab[data-view]"), function(x){ x.classList.remove("on"); });
     t.classList.add("on");
     const v = t.dataset.view;
+    clearSearches(); renderApps(); renderVault();
     if(v === "archive"){ $("asearch").value = ""; renderArchive(); }
     $("viewHub").style.display     = v === "hub"     ? "" : "none";
     $("viewArchive").style.display = v === "archive" ? "" : "none";
@@ -1139,7 +1147,9 @@ function renderVault(){
     return hay.toLowerCase().indexOf(q) !== -1;
   });
 
-  $("vcount").textContent = list.length + (list.length === 1 ? " voce" : " voci");
+  $("vcount").textContent = q
+    ? list.length + " di " + all.length + " voci"
+    : list.length + (list.length === 1 ? " voce" : " voci");
   box.innerHTML = "";
 
   if(!list.length){
