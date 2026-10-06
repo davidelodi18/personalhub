@@ -271,6 +271,8 @@
     padding:14px 18px;color:var(--muted-text);font-size:.86rem;line-height:1.55;
     background:var(--bg-2);
   }
+  .notice.warn{margin:0 0 14px;border-color:var(--danger);color:var(--text)}
+  .notice.warn .btn{margin-top:10px;margin-right:6px}
 
   /* ─────────── finestre ─────────── */
   .modal{
@@ -403,6 +405,7 @@
       <div class="count" id="vcount"></div>
       <button class="btn primary" id="btnAddEntry">+ Aggiungi password</button>
     </div>
+    <div class="notice warn" id="vaultWarn" style="display:none"></div>
     <div class="vault-list" id="vaultList"></div>
     <div class="notice" id="cryptoNote"></div>
   </section>
@@ -638,6 +641,10 @@ let vault = [];
 let online = false;
 let db = null, ref = null;
 let appsSnapSeen = false;
+let isSignedIn = false;      // accesso a Firebase riuscito
+let vaultRemoteOk = true;    // false se l'archivio online non si decifra con questa password
+let vaultPushFailed = false; // true se Firebase ha rifiutato l'ultimo salvataggio
+let vaultSeq = 0;            // scarta le decifrature arrivate fuori ordine
 
 const $  = id => document.getElementById(id);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
@@ -706,6 +713,7 @@ async function unlock(pw){
     }
   }
 
+  isSignedIn = signedIn;
   masterPw = pw;
   sessionStorage.setItem(S_PW, pw);
   await rememberPw(pw);
@@ -764,15 +772,30 @@ function startSync(){
   }, function(){ setStatus(false, "offline"); });
 
   ref.child("vault").on("value", async function(snap){
+    const seq = ++vaultSeq;
     const rec = snap.val();
-    if(!rec) return;
-    localStorage.setItem(K_VAULT, JSON.stringify(rec));
-    try{
-      vault = await openVault(masterPw, rec);
-      renderVault();
-    }catch(e){
-      toast("L'archivio è cifrato con un'altra password");
+    if(!rec){
+      // niente online: se su questo dispositivo ci sono voci, le carico
+      if(vault.length) saveVault(true);
+      return;
     }
+    let remote;
+    try{
+      remote = await openVault(masterPw, rec);
+    }catch(e){
+      if(seq !== vaultSeq) return;
+      vaultRemoteOk = false;   // non sovrascrivo l'archivio online: andrebbe perso
+      renderVaultWarn();
+      return;
+    }
+    if(seq !== vaultSeq) return;
+    vaultRemoteOk = true;
+    // unisco online + locale: le voci salvate qui e mai arrivate online non si perdono più
+    const merged = mergeVault(remote, vault);
+    vault = merged;
+    if(vaultSig(merged) !== vaultSig(remote)) saveVault(true);
+    else localStorage.setItem(K_VAULT, JSON.stringify(rec));
+    renderVault(); renderVaultWarn();
   });
 
   db.ref(".info/connected").on("value", function(s){
@@ -780,16 +803,64 @@ function startSync(){
   });
 }
 
+/* Scrivo sempre su Firebase quando l'accesso è riuscito: se la connessione
+   è momentaneamente giù, Firebase mette in coda e invia appena torna. */
 function saveApps(){
   localStorage.setItem(K_APPS, JSON.stringify(apps));
-  if(online && ref) ref.child("apps").set({list:apps, ts:Date.now()})
-    .catch(function(){ toast("Salvato solo su questo dispositivo"); });
+  if(isSignedIn && ref) ref.child("apps").set({list:apps, ts:Date.now()})
+    .catch(function(){ toast("Firebase ha rifiutato il salvataggio dei programmi"); });
 }
-async function saveVault(){
+async function saveVault(auto){
   const rec = await sealVault(masterPw, vault);
   localStorage.setItem(K_VAULT, JSON.stringify(rec));
-  if(online && ref) ref.child("vault").set(rec)
-    .catch(function(){ toast("Salvato solo su questo dispositivo"); });
+  if(!isSignedIn || !ref) return;
+  if(!vaultRemoteOk){ renderVaultWarn(); return; }
+  if(auto && vaultPushFailed) return;
+  ref.child("vault").set(rec).then(function(){
+    if(vaultPushFailed){ vaultPushFailed = false; renderVaultWarn(); }
+  }, function(){
+    vaultPushFailed = true; renderVaultWarn();
+    toast("Firebase ha rifiutato il salvataggio delle password");
+  });
+}
+
+/* unione per voce: vince la modifica più recente; le eliminazioni restano come "tombstone" */
+function mergeVault(remote, local){
+  const map = new Map();
+  (remote || []).forEach(function(e){ if(e && e.id) map.set(e.id, e); });
+  (local || []).forEach(function(e){
+    if(!e || !e.id) return;
+    const r = map.get(e.id);
+    if(!r || (e.ts || 0) > (r.ts || 0)) map.set(e.id, e);
+  });
+  return Array.from(map.values());
+}
+function vaultSig(list){
+  return list.map(function(e){ return e.id + ":" + (e.ts || 0) + (e.deleted ? "x" : ""); }).sort().join("|");
+}
+const liveVault = () => vault.filter(function(e){ return !e.deleted; });
+
+function renderVaultWarn(){
+  const w = $("vaultWarn");
+  if(!vaultRemoteOk){
+    w.innerHTML = "<strong>Le password online sono cifrate con una password diversa da quella con cui sei entrato.</strong> " +
+      "Per non cancellarle, quelle che salvi ora restano solo su questo dispositivo. Premi <em>Blocca</em> e rientra con la password giusta." +
+      '<br><button class="btn sm danger" id="btnForceVault">Sostituisci comunque quelle online</button>';
+    w.style.display = "";
+    $("btnForceVault").onclick = function(){
+      if(!confirm("Le password salvate online (cifrate con l'altra password) verranno sostituite da quelle di questo dispositivo. Procedere?")) return;
+      vaultRemoteOk = true; vaultPushFailed = false; saveVault(); renderVaultWarn();
+    };
+  }else if(vaultPushFailed){
+    w.innerHTML = "<strong>Firebase non accetta il salvataggio delle password.</strong> " +
+      "Le voci sono salvate su questo dispositivo ma non sincronizzate: controlla le regole del database " +
+      "(il nodo <code>hubPersonale/vault</code> deve essere scrivibile dagli utenti autenticati)." +
+      '<br><button class="btn sm" id="btnRetryVault">Riprova</button>';
+    w.style.display = "";
+    $("btnRetryVault").onclick = function(){ saveVault(); };
+  }else{
+    w.style.display = "none"; w.innerHTML = "";
+  }
 }
 
 /* ─────────── viste ─────────── */
@@ -1061,7 +1132,8 @@ $("btnDelApp").addEventListener("click", function(){
 function renderVault(){
   const box = $("vaultList");
   const q = $("vsearch").value.trim().toLowerCase();
-  const list = vault.filter(function(e){
+  const all = liveVault();
+  const list = all.filter(function(e){
     const a = appById(e.appId);
     const hay = [e.site, e.user, e.url, e.note, a ? a.name : "", a ? a.group : ""].join(" ");
     return hay.toLowerCase().indexOf(q) !== -1;
@@ -1071,7 +1143,7 @@ function renderVault(){
   box.innerHTML = "";
 
   if(!list.length){
-    box.innerHTML = vault.length
+    box.innerHTML = all.length
       ? '<div class="empty"><strong>Nessuna voce trovata</strong>Prova con un\'altra parola.</div>'
       : '<div class="empty"><strong>Archivio vuoto</strong>Aggiungi le credenziali dei tuoi siti: vengono cifrate prima di partire.</div>';
     return;
@@ -1181,7 +1253,8 @@ $("btnSaveEntry").addEventListener("click", async function(){
     site: site, url: url,
     user: $("eUser").value.trim(),
     pass: $("ePass").value,
-    note: $("eNote").value.trim()
+    note: $("eNote").value.trim(),
+    ts: Date.now()
   };
   const wasEdit = !!editingEntry;
   if(editingEntry) Object.assign(editingEntry, data);
@@ -1193,7 +1266,8 @@ $("btnSaveEntry").addEventListener("click", async function(){
 $("btnDelEntry").addEventListener("click", async function(){
   if(editingEntry && confirm('Eliminare "' + editingEntry.site + '" dall\'archivio?')){
     const id = editingEntry.id;
-    vault = vault.filter(function(e){ return e.id !== id; });
+    // resta una "tombstone": così l'eliminazione arriva anche agli altri dispositivi
+    vault = vault.map(function(e){ return e.id === id ? {id:id, deleted:true, ts:Date.now()} : e; });
     await saveVault(); renderVault(); closeModals(); toast("Voce eliminata");
   }
 });
@@ -1241,10 +1315,13 @@ $("fileImport").addEventListener("change", async function(ev){
     apps = data.apps || [];
     saveApps();
     if(data.vault){
-      localStorage.setItem(K_VAULT, JSON.stringify(data.vault));
-      if(online && ref) await ref.child("vault").set(data.vault);
+      // prima sostituisco le voci in memoria, poi scrivo online (altrimenti l'unione riporterebbe le vecchie)
       try{ vault = await openVault(masterPw, data.vault); }
-      catch(e){ toast("Archivio importato: è cifrato con un'altra password"); }
+      catch(e){ vault = []; toast("Archivio importato: è cifrato con un'altra password"); }
+      localStorage.setItem(K_VAULT, JSON.stringify(data.vault));
+      vaultRemoteOk = true; vaultPushFailed = false;
+      if(isSignedIn && ref) ref.child("vault").set(data.vault)
+        .catch(function(){ vaultPushFailed = true; renderVaultWarn(); });
     }
     renderApps(); renderVault(); closeModals();
     toast("Backup importato");
